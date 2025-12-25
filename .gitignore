@@ -33,3 +33,10 @@ Testing/
 .DS_Store
 Thumbs.db
 
+# Documentation images (GIFs) - uncomment when ready to commit
+docs/images/*.gif
+docs/images/*.mp4
+docs/images/*.png
+docs/images/*.jpg
+!docs/images/.gitkeep
+

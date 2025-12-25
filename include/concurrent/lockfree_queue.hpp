@@ -101,29 +101,33 @@ public:
      * @return std::optional<T> containing the item if available, empty otherwise
      */
     std::optional<T> dequeue() {
-        Node* head = head_.load(std::memory_order_acquire);
-        Node* next = head->next.load(std::memory_order_acquire);
+        while (true) {
+            Node* head = head_.load(std::memory_order_acquire);
+            Node* next = head->next.load(std::memory_order_acquire);
 
-        if (next == nullptr) {
-            return std::nullopt; // Queue is empty
+            if (next == nullptr) {
+                return std::nullopt; // Queue is empty
+            }
+
+            T* data = next->data.load(std::memory_order_acquire);
+            if (data == nullptr) {
+                return std::nullopt;
+            }
+
+            // Try to atomically update head - only one thread succeeds
+            Node* old_head = head;
+            if (head_.compare_exchange_weak(head, next, std::memory_order_release, std::memory_order_acquire)) {
+                // This thread successfully updated head
+                // Now we can safely move the data out and clean up
+                T result = std::move(*data);
+                delete data;
+                // Clear the data pointer to avoid issues in destructor
+                next->data.store(nullptr, std::memory_order_release);
+                deallocate_node(old_head);
+                return result;
+            }
+            // CAS failed, another thread updated head first - retry
         }
-
-        T* data = next->data.load(std::memory_order_acquire);
-        if (data == nullptr) {
-            return std::nullopt;
-        }
-
-        // Move the data out
-        T result = std::move(*data);
-        delete data;
-
-        // Update head
-        head_.store(next, std::memory_order_release);
-
-        // Clean up old dummy node
-        deallocate_node(head);
-
-        return result;
     }
 
     /**

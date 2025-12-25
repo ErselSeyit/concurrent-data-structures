@@ -68,9 +68,14 @@ public:
      * @brief Destructor - waits for all tasks to complete
      */
     ~ThreadPool() {
+        // Wait for all queued and active tasks to complete first
+        wait();
+        
+        // Signal workers to stop
         stop_.store(true, std::memory_order_release);
         condition_.notify_all();
 
+        // Wait for all workers to finish
         for (auto& worker : workers_) {
             if (worker.joinable()) {
                 worker.join();
@@ -113,8 +118,19 @@ public:
      * @brief Waits for all tasks to complete
      */
     void wait() {
-        while (active_tasks_.load(std::memory_order_acquire) > 0 || 
-               !task_queue_.empty()) {
+        // Wait for active tasks to complete
+        while (active_tasks_.load(std::memory_order_acquire) > 0) {
+            std::this_thread::yield();
+        }
+        
+        // Drain the queue to ensure all tasks are processed
+        while (!task_queue_.empty()) {
+            auto task_opt = task_queue_.dequeue();
+            if (task_opt.has_value()) {
+                active_tasks_.fetch_add(1, std::memory_order_relaxed);
+                task_opt.value()();
+                active_tasks_.fetch_sub(1, std::memory_order_relaxed);
+            }
             std::this_thread::yield();
         }
     }

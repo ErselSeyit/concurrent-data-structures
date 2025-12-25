@@ -96,6 +96,9 @@ void example_thread_pool() {
     
     std::cout << "Total: " << total << std::endl;
     std::cout << "Active tasks: " << pool.active_tasks() << std::endl;
+    
+    // Explicitly wait for all tasks before pool destruction
+    pool.wait();
 }
 
 int main() {

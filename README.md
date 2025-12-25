@@ -7,10 +7,63 @@ A modern C++20 library implementing lock-free, high-performance concurrent data 
 - **Lock-Free Queue**: Wait-free enqueue/dequeue operations using atomic operations
 - **Lock-Free Hash Map**: High-performance concurrent hash map with fine-grained synchronization
 - **Thread Pool**: Efficient thread pool with work-stealing capabilities
+- **Interactive GUI**: Real-time monitoring and visualization tool with performance metrics
 - **Modern C++20**: Utilizes latest C++ features (concepts, ranges, smart pointers, etc.)
 - **Zero Dependencies**: Core library has no external dependencies (except for testing)
 - **Comprehensive Tests**: Full test coverage using Google Test
 - **Performance Benchmarks**: Built-in benchmarking suite
+
+## 🖥️ GUI Monitoring Application
+
+The project includes a comprehensive GUI monitoring application built with ImGui that provides real-time visualization and interaction with all data structures.
+
+### Features
+- **Real-time Monitoring**: Live statistics and metrics for all data structures
+- **Tabbed Interface**: Organized tabs for Queue, Hash Map, Thread Pool, and Performance
+- **Visual Graphs**: Queue size, active tasks, throughput, and latency history
+- **Interactive Controls**: Test operations directly from the GUI
+- **Performance Metrics**: Latency tracking, throughput calculation, and operation timing
+- **Queue Visualization**: Visual representation of queue contents
+- **Export Functionality**: Export statistics to file
+
+### Screenshots & Demos
+
+![GUI Overview](docs/images/gui_overview.gif)
+*Overview of the GUI showing all tabs and real-time monitoring*
+
+![Queue Operations](docs/images/gui_queue.gif)
+*Queue tab with auto producer/consumer and visualization*
+
+![Hash Map Operations](docs/images/gui_hashmap.gif)
+*Hash map operations and statistics*
+
+![Thread Pool](docs/images/gui_threadpool.gif)
+*Thread pool monitoring with task submission*
+
+![Performance Metrics](docs/images/gui_performance.gif)
+*Performance tab with latency and throughput graphs*
+
+### Running the GUI
+
+```bash
+cd build
+./gui
+```
+
+### Recording GIFs
+
+To create GIFs of the GUI in action, use the provided recording scripts:
+
+```bash
+# Simple recording (20 seconds)
+cd scripts
+./record_simple.sh 20 gui_demo
+
+# Advanced recording (requires xdotool)
+./record_gui.sh gui_demo
+```
+
+The GIFs will be saved to `docs/images/` directory.
 
 ## 📋 Requirements
 
@@ -39,6 +92,9 @@ ctest
 
 # Run examples
 ./example
+
+# Run GUI application
+./gui
 ```
 
 ## 📖 Usage Examples
@@ -176,8 +232,15 @@ ctest --verbose
 │   └── test_thread_pool.cpp
 ├── benchmarks/
 │   └── main.cpp
-└── examples/
-    └── main.cpp
+├── examples/
+│   └── main.cpp
+├── gui/
+│   └── main.cpp
+├── scripts/
+│   ├── record_gui.sh
+│   └── record_simple.sh
+└── docs/
+    └── images/          # GIFs and screenshots
 ```
 
 ## 🔧 Technical Details

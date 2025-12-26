@@ -47,13 +47,19 @@ struct Stats {
     std::mutex latency_mutex;
     const size_t max_latency_samples = 1000;
     
-    // Hash map snapshot for display
-    std::map<std::string, int> hashmap_snapshot;
-    std::mutex snapshot_mutex;
-    
-    // Queue contents snapshot
+    // Queue snapshot for visualization (non-destructive)
     std::vector<int> queue_snapshot;
     std::mutex queue_snapshot_mutex;
+    
+    void update_queue_snapshot(const std::vector<int>& snapshot) {
+        std::lock_guard<std::mutex> lock(queue_snapshot_mutex);
+        queue_snapshot = snapshot;
+    }
+    
+    std::vector<int> get_queue_snapshot() {
+        std::lock_guard<std::mutex> lock(queue_snapshot_mutex);
+        return queue_snapshot;
+    }
     
     void add_queue_size(float size) {
         std::lock_guard<std::mutex> lock(history_mutex);
@@ -124,6 +130,7 @@ std::atomic<bool> g_auto_producer_running{false};
 std::atomic<bool> g_auto_consumer_running{false};
 std::thread g_producer_thread;
 std::thread g_consumer_thread;
+std::mutex thread_mutex;
 
 void auto_producer() {
     int counter = 0;
@@ -149,6 +156,19 @@ void auto_consumer() {
             g_stats.queue_dequeued.fetch_add(1);
         }
         std::this_thread::sleep_for(std::chrono::milliseconds(150));
+    }
+}
+
+void stop_auto_threads() {
+    g_auto_producer_running.store(false);
+    g_auto_consumer_running.store(false);
+    
+    std::lock_guard<std::mutex> lock(thread_mutex);
+    if (g_producer_thread.joinable()) {
+        g_producer_thread.join();
+    }
+    if (g_consumer_thread.joinable()) {
+        g_consumer_thread.join();
     }
 }
 
@@ -210,10 +230,16 @@ void setup_custom_style() {
     style.GrabRounding = 3.0f;
     style.TabRounding = 3.0f;
     
-    // Spacing
+    // Spacing - responsive
     style.ItemSpacing = ImVec2(8, 6);
     style.ItemInnerSpacing = ImVec2(6, 4);
     style.FramePadding = ImVec2(6, 4);
+}
+
+// Helper function to get responsive child window size
+ImVec2 get_responsive_size(float width_ratio, float height) {
+    ImVec2 avail = ImGui::GetContentRegionAvail();
+    return ImVec2(avail.x * width_ratio, height);
 }
 
 int main() {
@@ -222,7 +248,7 @@ int main() {
         return -1;
     }
 
-    // Create window
+    // Create window - make it resizable
     GLFWwindow* window = glfwCreateWindow(1800, 1200, "Concurrent Data Structures Monitor", nullptr, nullptr);
     if (!window) {
         glfwTerminate();
@@ -236,10 +262,6 @@ int main() {
     float xscale, yscale;
     glfwGetWindowContentScale(window, &xscale, &yscale);
     
-    int width = static_cast<int>(1800 * xscale);
-    int height = static_cast<int>(1200 * yscale);
-    glfwSetWindowSize(window, width, height);
-
     // Initialize ImGui
     IMGUI_CHECKVERSION();
     ImGui::CreateContext();
@@ -260,6 +282,7 @@ int main() {
 
     auto last_update = std::chrono::steady_clock::now();
     auto last_throughput_calc = std::chrono::steady_clock::now();
+    auto last_snapshot_update = std::chrono::steady_clock::now();
     size_t last_total_ops = 0;
     
     while (!glfwWindowShouldClose(window)) {
@@ -279,6 +302,31 @@ int main() {
             last_update = now;
         }
         
+        // Update queue snapshot periodically (non-destructive)
+        if (std::chrono::duration_cast<std::chrono::milliseconds>(now - last_snapshot_update).count() > 500) {
+            // Create snapshot without modifying the actual queue
+            std::vector<int> snapshot;
+            LockFreeQueue<int> temp_queue;
+            int count = 0;
+            while (!g_queue.empty() && count < 50) {
+                auto item = g_queue.dequeue();
+                if (item.has_value()) {
+                    snapshot.push_back(item.value());
+                    temp_queue.enqueue(item.value());
+                }
+                count++;
+            }
+            // Restore queue
+            while (!temp_queue.empty()) {
+                auto item = temp_queue.dequeue();
+                if (item.has_value()) {
+                    g_queue.enqueue(item.value());
+                }
+            }
+            g_stats.update_queue_snapshot(snapshot);
+            last_snapshot_update = now;
+        }
+        
         // Calculate throughput
         if (std::chrono::duration_cast<std::chrono::milliseconds>(now - last_throughput_calc).count() > 1000) {
             size_t current_total = g_stats.queue_enqueued.load() + g_stats.queue_dequeued.load();
@@ -288,18 +336,13 @@ int main() {
             last_throughput_calc = now;
         }
 
-        // Main window
+        // Main window - make it resizable
         ImGuiViewport* viewport = ImGui::GetMainViewport();
         ImGui::SetNextWindowPos(viewport->Pos);
         ImGui::SetNextWindowSize(viewport->Size);
         
         ImGui::Begin("Concurrent Data Structures Monitor", nullptr, 
-                     ImGuiWindowFlags_MenuBar | 
-                     ImGuiWindowFlags_NoTitleBar | 
-                     ImGuiWindowFlags_NoCollapse | 
-                     ImGuiWindowFlags_NoResize | 
-                     ImGuiWindowFlags_NoMove |
-                     ImGuiWindowFlags_NoBringToFrontOnFocus);
+                     ImGuiWindowFlags_MenuBar);
 
         // Menu bar
         if (ImGui::BeginMenuBar()) {
@@ -323,16 +366,23 @@ int main() {
             ImGui::EndMenuBar();
         }
 
+        // Get available space for responsive sizing
+        ImVec2 avail = ImGui::GetContentRegionAvail();
+        float card_width = std::min(avail.x * 0.3f, 350.0f);
+        float card_height = 120.0f;
+        float controls_width = std::min(avail.x * 0.45f, 500.0f);
+        float graph_height = std::max(avail.y * 0.25f, 150.0f);
+
         // Tabs
         if (ImGui::BeginTabBar("MainTabs")) {
             // Queue Tab
             if (ImGui::BeginTabItem("Queue")) {
                 ImGui::Spacing();
                 
-                // Statistics cards
+                // Statistics cards - responsive
                 ImGui::BeginGroup();
                 ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.15f, 0.15f, 0.20f, 1.0f));
-                ImGui::BeginChild("QueueStats", ImVec2(300, 120), true);
+                ImGui::BeginChild("QueueStats", ImVec2(card_width, card_height), true);
                 ImGui::TextColored(ImVec4(0.4f, 0.7f, 1.0f, 1.0f), "Queue Statistics");
                 ImGui::Separator();
                 ImGui::Text("Size: %zu", g_queue.approximate_size());
@@ -344,14 +394,15 @@ int main() {
                 
                 ImGui::SameLine();
                 
-                // Controls
+                // Controls - responsive
                 ImGui::BeginGroup();
                 ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.15f, 0.15f, 0.20f, 1.0f));
-                ImGui::BeginChild("QueueControls", ImVec2(400, 120), true);
+                ImGui::BeginChild("QueueControls", ImVec2(controls_width, card_height), true);
                 ImGui::TextColored(ImVec4(0.4f, 0.7f, 1.0f, 1.0f), "Controls");
                 ImGui::Separator();
                 
                 static int queue_value = 0;
+                ImGui::SetNextItemWidth(100);
                 ImGui::InputInt("Value", &queue_value, 1, 10);
                 ImGui::SameLine();
                 if (ImGui::Button("Enqueue", ImVec2(80, 0))) {
@@ -379,16 +430,26 @@ int main() {
                 bool auto_prod = g_auto_producer_running.load();
                 if (ImGui::Checkbox("Auto Producer", &auto_prod)) {
                     g_auto_producer_running.store(auto_prod);
-                    if (auto_prod && !g_producer_thread.joinable()) {
-                        g_producer_thread = std::thread(auto_producer);
+                    if (auto_prod) {
+                        std::lock_guard<std::mutex> lock(thread_mutex);
+                        if (!g_producer_thread.joinable()) {
+                            g_producer_thread = std::thread(auto_producer);
+                        }
+                    } else {
+                        stop_auto_threads();
                     }
                 }
                 ImGui::SameLine();
                 bool auto_cons = g_auto_consumer_running.load();
                 if (ImGui::Checkbox("Auto Consumer", &auto_cons)) {
                     g_auto_consumer_running.store(auto_cons);
-                    if (auto_cons && !g_consumer_thread.joinable()) {
-                        g_consumer_thread = std::thread(auto_consumer);
+                    if (auto_cons) {
+                        std::lock_guard<std::mutex> lock(thread_mutex);
+                        if (!g_consumer_thread.joinable()) {
+                            g_consumer_thread = std::thread(auto_consumer);
+                        }
+                    } else {
+                        stop_auto_threads();
                     }
                 }
                 ImGui::EndChild();
@@ -397,39 +458,32 @@ int main() {
                 
                 ImGui::Spacing();
                 
-                // Queue visualization
+                // Queue visualization - responsive
                 ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.15f, 0.15f, 0.20f, 1.0f));
-                ImGui::BeginChild("QueueViz", ImVec2(-1, 150), true);
+                ImGui::BeginChild("QueueViz", ImVec2(-1, std::max(avail.y * 0.15f, 120.0f)), true);
                 ImGui::TextColored(ImVec4(0.4f, 0.7f, 1.0f, 1.0f), "Queue Contents (Last 50 items)");
                 ImGui::Separator();
                 
-                // Sample queue contents for visualization
-                std::vector<int> sample;
-                LockFreeQueue<int> temp_queue;
-                int count = 0;
-                while (!g_queue.empty() && count < 50) {
-                    auto item = g_queue.dequeue();
-                    if (item.has_value()) {
-                        sample.push_back(item.value());
-                        temp_queue.enqueue(item.value());
-                    }
-                    count++;
-                }
-                while (!temp_queue.empty()) {
-                    auto item = temp_queue.dequeue();
-                    if (item.has_value()) {
-                        g_queue.enqueue(item.value());
-                    }
-                }
+                // Use snapshot instead of modifying queue
+                auto snapshot = g_stats.get_queue_snapshot();
                 
-                if (!sample.empty()) {
+                if (!snapshot.empty()) {
                     ImGui::Text("Front -> ");
-                    for (size_t i = 0; i < sample.size() && i < 50; ++i) {
+                    float button_width = 40.0f;
+                    float available_width = ImGui::GetContentRegionAvail().x - 100.0f;
+                    int items_per_row = static_cast<int>(available_width / (button_width + 4.0f));
+                    items_per_row = std::max(1, items_per_row);
+                    
+                    for (size_t i = 0; i < snapshot.size() && i < 50; ++i) {
+                        if (i > 0 && i % items_per_row == 0) {
+                            ImGui::NewLine();
+                        }
                         ImGui::SameLine();
                         ImGui::PushStyleColor(ImGuiCol_Button, ImVec4(0.2f, 0.5f, 0.8f, 0.6f));
-                        ImGui::Button(std::to_string(sample[i]).c_str(), ImVec2(40, 30));
+                        ImGui::Button(std::to_string(snapshot[i]).c_str(), ImVec2(button_width, 30));
                         ImGui::PopStyleColor();
                     }
+                    ImGui::NewLine();
                     ImGui::Text(" <- Back");
                 } else {
                     ImGui::TextColored(ImVec4(0.5f, 0.5f, 0.5f, 1.0f), "Queue is empty");
@@ -439,17 +493,17 @@ int main() {
                 
                 ImGui::Spacing();
                 
-                // Graphs
+                // Graphs - responsive
                 {
                     std::lock_guard<std::mutex> lock(g_stats.history_mutex);
                     if (!g_stats.queue_size_history.empty()) {
                         ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.15f, 0.15f, 0.20f, 1.0f));
-                        ImGui::BeginChild("QueueGraph", ImVec2(-1, 200), true);
+                        ImGui::BeginChild("QueueGraph", ImVec2(-1, graph_height), true);
                         ImGui::TextColored(ImVec4(0.4f, 0.7f, 1.0f, 1.0f), "Queue Size History");
                         float max_val = *std::max_element(g_stats.queue_size_history.begin(), g_stats.queue_size_history.end());
                         ImGui::PlotLines("", g_stats.queue_size_history.data(), 
                                         static_cast<int>(g_stats.queue_size_history.size()), 
-                                        0, nullptr, 0.0f, std::max(max_val * 1.2f, 10.0f), ImVec2(-1, 150));
+                                        0, nullptr, 0.0f, std::max(max_val * 1.2f, 10.0f), ImVec2(-1, -1));
                         ImGui::EndChild();
                         ImGui::PopStyleColor();
                     }
@@ -462,10 +516,10 @@ int main() {
             if (ImGui::BeginTabItem("Hash Map")) {
                 ImGui::Spacing();
                 
-                // Statistics
+                // Statistics - responsive
                 ImGui::BeginGroup();
                 ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.15f, 0.15f, 0.20f, 1.0f));
-                ImGui::BeginChild("HashMapStats", ImVec2(300, 120), true);
+                ImGui::BeginChild("HashMapStats", ImVec2(card_width, card_height), true);
                 ImGui::TextColored(ImVec4(0.4f, 0.7f, 1.0f, 1.0f), "Hash Map Statistics");
                 ImGui::Separator();
                 ImGui::Text("Size: %zu", g_hashmap.size());
@@ -478,17 +532,19 @@ int main() {
                 
                 ImGui::SameLine();
                 
-                // Controls
+                // Controls - responsive
                 ImGui::BeginGroup();
                 ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.15f, 0.15f, 0.20f, 1.0f));
-                ImGui::BeginChild("HashMapControls", ImVec2(500, 120), true);
+                ImGui::BeginChild("HashMapControls", ImVec2(controls_width, card_height), true);
                 ImGui::TextColored(ImVec4(0.4f, 0.7f, 1.0f, 1.0f), "Controls");
                 ImGui::Separator();
                 
                 static char key_buffer[256] = "key";
                 static int map_value = 0;
+                ImGui::SetNextItemWidth(150);
                 ImGui::InputText("Key", key_buffer, sizeof(key_buffer));
                 ImGui::SameLine();
+                ImGui::SetNextItemWidth(100);
                 ImGui::InputInt("Value", &map_value);
                 
                 if (ImGui::Button("Insert/Update", ImVec2(100, 0))) {
@@ -545,19 +601,12 @@ int main() {
                 
                 ImGui::Spacing();
                 
-                // Hash Map Contents Table
+                // Hash Map Contents - responsive
                 ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.15f, 0.15f, 0.20f, 1.0f));
-                ImGui::BeginChild("HashMapContents", ImVec2(-1, 400), true);
+                ImGui::BeginChild("HashMapContents", ImVec2(-1, std::max(avail.y * 0.4f, 200.0f)), true);
                 ImGui::TextColored(ImVec4(0.4f, 0.7f, 1.0f, 1.0f), "Hash Map Contents");
                 ImGui::Separator();
                 
-                // Create snapshot of hash map (this is approximate for display)
-                // Note: This is a simplified approach - in production you'd want a better way
-                static std::vector<std::pair<std::string, int>> display_items;
-                display_items.clear();
-                
-                // We can't easily iterate the hash map, so we'll show a message
-                // In a real implementation, you'd add iteration support to the hash map
                 if (g_hashmap.size() > 0) {
                     ImGui::TextColored(ImVec4(0.8f, 0.8f, 0.8f, 1.0f), 
                         "Hash map contains %zu entries. Use Get operation to retrieve values.", g_hashmap.size());
@@ -577,10 +626,10 @@ int main() {
             if (ImGui::BeginTabItem("Thread Pool")) {
                 ImGui::Spacing();
                 
-                // Statistics
+                // Statistics - responsive
                 ImGui::BeginGroup();
                 ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.15f, 0.15f, 0.20f, 1.0f));
-                ImGui::BeginChild("ThreadPoolStats", ImVec2(300, 150), true);
+                ImGui::BeginChild("ThreadPoolStats", ImVec2(card_width, card_height + 30), true);
                 ImGui::TextColored(ImVec4(0.4f, 0.7f, 1.0f, 1.0f), "Thread Pool Statistics");
                 ImGui::Separator();
                 if (g_thread_pool) {
@@ -596,14 +645,16 @@ int main() {
                 
                 ImGui::SameLine();
                 
-                // Controls
+                // Controls - responsive
                 ImGui::BeginGroup();
                 ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.15f, 0.15f, 0.20f, 1.0f));
-                ImGui::BeginChild("ThreadPoolControls", ImVec2(400, 150), true);
+                ImGui::BeginChild("ThreadPoolControls", ImVec2(controls_width, card_height + 30), true);
                 ImGui::TextColored(ImVec4(0.4f, 0.7f, 1.0f, 1.0f), "Controls");
                 ImGui::Separator();
                 
-                if (ImGui::Button("Submit Test Task", ImVec2(150, 0))) {
+                float button_width = std::min((controls_width - 20) / 2.0f, 150.0f);
+                
+                if (ImGui::Button("Submit Test Task", ImVec2(button_width, 0))) {
                     if (g_thread_pool) {
                         g_thread_pool->submit([]() {
                             std::this_thread::sleep_for(std::chrono::milliseconds(500));
@@ -614,7 +665,7 @@ int main() {
                     }
                 }
                 ImGui::SameLine();
-                if (ImGui::Button("Submit 10 Tasks", ImVec2(150, 0))) {
+                if (ImGui::Button("Submit 10 Tasks", ImVec2(button_width, 0))) {
                     if (g_thread_pool) {
                         for (int i = 0; i < 10; ++i) {
                             g_thread_pool->submit([i]() {
@@ -628,7 +679,7 @@ int main() {
                 }
                 
                 ImGui::Spacing();
-                if (ImGui::Button("Submit 100 Tasks", ImVec2(150, 0))) {
+                if (ImGui::Button("Submit 100 Tasks", ImVec2(button_width, 0))) {
                     if (g_thread_pool) {
                         for (int i = 0; i < 100; ++i) {
                             g_thread_pool->submit([i]() {
@@ -647,17 +698,17 @@ int main() {
                 
                 ImGui::Spacing();
                 
-                // Graphs
+                // Graphs - responsive
                 {
                     std::lock_guard<std::mutex> lock(g_stats.history_mutex);
                     if (!g_stats.active_tasks_history.empty()) {
                         ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.15f, 0.15f, 0.20f, 1.0f));
-                        ImGui::BeginChild("ThreadPoolGraph", ImVec2(-1, 200), true);
+                        ImGui::BeginChild("ThreadPoolGraph", ImVec2(-1, graph_height), true);
                         ImGui::TextColored(ImVec4(0.4f, 0.7f, 1.0f, 1.0f), "Active Tasks History");
                         float max_val = *std::max_element(g_stats.active_tasks_history.begin(), g_stats.active_tasks_history.end());
                         ImGui::PlotLines("", g_stats.active_tasks_history.data(), 
                                         static_cast<int>(g_stats.active_tasks_history.size()), 
-                                        0, nullptr, 0.0f, std::max(max_val * 1.2f, 5.0f), ImVec2(-1, 150));
+                                        0, nullptr, 0.0f, std::max(max_val * 1.2f, 5.0f), ImVec2(-1, -1));
                         ImGui::EndChild();
                         ImGui::PopStyleColor();
                     }
@@ -670,10 +721,12 @@ int main() {
             if (ImGui::BeginTabItem("Performance")) {
                 ImGui::Spacing();
                 
-                // Performance metrics
+                float perf_card_width = std::min(avail.x * 0.45f, 400.0f);
+                
+                // Performance metrics - responsive
                 ImGui::BeginGroup();
                 ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.15f, 0.15f, 0.20f, 1.0f));
-                ImGui::BeginChild("PerfMetrics", ImVec2(400, 200), true);
+                ImGui::BeginChild("PerfMetrics", ImVec2(perf_card_width, 200), true);
                 ImGui::TextColored(ImVec4(0.4f, 0.7f, 1.0f, 1.0f), "Performance Metrics");
                 ImGui::Separator();
                 
@@ -700,10 +753,10 @@ int main() {
                 
                 ImGui::SameLine();
                 
-                // Latency distribution
+                // Latency distribution - responsive
                 ImGui::BeginGroup();
                 ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.15f, 0.15f, 0.20f, 1.0f));
-                ImGui::BeginChild("LatencyDist", ImVec2(400, 200), true);
+                ImGui::BeginChild("LatencyDist", ImVec2(perf_card_width, 200), true);
                 ImGui::TextColored(ImVec4(0.4f, 0.7f, 1.0f, 1.0f), "Latency Distribution");
                 ImGui::Separator();
                 
@@ -730,33 +783,33 @@ int main() {
                 
                 ImGui::Spacing();
                 
-                // Throughput graph
+                // Throughput graph - responsive
                 {
                     std::lock_guard<std::mutex> lock(g_stats.history_mutex);
                     if (!g_stats.throughput_history.empty()) {
                         ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.15f, 0.15f, 0.20f, 1.0f));
-                        ImGui::BeginChild("ThroughputGraph", ImVec2(-1, 200), true);
+                        ImGui::BeginChild("ThroughputGraph", ImVec2(-1, graph_height), true);
                         ImGui::TextColored(ImVec4(0.4f, 0.7f, 1.0f, 1.0f), "Throughput History (ops/sec)");
                         float max_val = *std::max_element(g_stats.throughput_history.begin(), g_stats.throughput_history.end());
                         ImGui::PlotLines("", g_stats.throughput_history.data(), 
                                         static_cast<int>(g_stats.throughput_history.size()), 
-                                        0, nullptr, 0.0f, std::max(max_val * 1.2f, 10.0f), ImVec2(-1, 150));
+                                        0, nullptr, 0.0f, std::max(max_val * 1.2f, 10.0f), ImVec2(-1, -1));
                         ImGui::EndChild();
                         ImGui::PopStyleColor();
                     }
                 }
                 
-                // Latency graph
+                // Latency graph - responsive
                 {
                     std::lock_guard<std::mutex> lock(g_stats.history_mutex);
                     if (!g_stats.latency_history.empty()) {
                         ImGui::PushStyleColor(ImGuiCol_ChildBg, ImVec4(0.15f, 0.15f, 0.20f, 1.0f));
-                        ImGui::BeginChild("LatencyGraph", ImVec2(-1, 200), true);
+                        ImGui::BeginChild("LatencyGraph", ImVec2(-1, graph_height), true);
                         ImGui::TextColored(ImVec4(0.4f, 0.7f, 1.0f, 1.0f), "Latency History (microseconds)");
                         float max_val = *std::max_element(g_stats.latency_history.begin(), g_stats.latency_history.end());
                         ImGui::PlotLines("", g_stats.latency_history.data(), 
                                         static_cast<int>(g_stats.latency_history.size()), 
-                                        0, nullptr, 0.0f, std::max(max_val * 1.2f, 10.0f), ImVec2(-1, 150));
+                                        0, nullptr, 0.0f, std::max(max_val * 1.2f, 10.0f), ImVec2(-1, -1));
                         ImGui::EndChild();
                         ImGui::PopStyleColor();
                     }
@@ -783,15 +836,7 @@ int main() {
     }
 
     // Cleanup
-    g_auto_producer_running.store(false);
-    g_auto_consumer_running.store(false);
-    if (g_producer_thread.joinable()) {
-        g_producer_thread.join();
-    }
-    if (g_consumer_thread.joinable()) {
-        g_consumer_thread.join();
-    }
-    
+    stop_auto_threads();
     g_thread_pool.reset();
 
     ImGui_ImplOpenGL3_Shutdown();

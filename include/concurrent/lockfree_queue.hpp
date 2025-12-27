@@ -3,6 +3,7 @@
 #include <atomic>
 #include <memory>
 #include <optional>
+#include <thread>
 #include <type_traits>
 
 namespace concurrent {
@@ -115,15 +116,31 @@ public:
             }
 
             // Try to atomically update head - only one thread succeeds
-            Node* old_head = head;
-            if (head_.compare_exchange_weak(head, next, std::memory_order_release, std::memory_order_acquire)) {
+            if (head_.compare_exchange_weak(head, next, std::memory_order_acq_rel, std::memory_order_acquire)) {
                 // This thread successfully updated head
                 // Now we can safely move the data out and clean up
                 T result = std::move(*data);
                 delete data;
                 // Clear the data pointer to avoid issues in destructor
                 next->data.store(nullptr, std::memory_order_release);
-                deallocate_node(old_head);
+                
+                // Memory reclamation: In a lock-free queue without proper memory
+                // reclamation (hazard pointers or epoch-based reclamation), safely
+                // deleting nodes during concurrent operations is extremely difficult.
+                // The old_head might still be referenced by tail_ in concurrent
+                // enqueue operations, leading to use-after-free.
+                //
+                // For safety, we defer all node deletion to the destructor.
+                // This guarantees thread safety at the cost of increased memory usage
+                // during the queue's lifetime. The destructor will clean up all nodes
+                // when the queue is destroyed (and presumably empty or no longer in use).
+                //
+                // Note: For production use with long-lived queues, consider implementing
+                // hazard pointers or epoch-based reclamation for proper memory management.
+                
+                // Skip node deletion - will be handled by destructor
+                // This is the safest approach without proper memory reclamation
+                
                 return result;
             }
             // CAS failed, another thread updated head first - retry
@@ -136,7 +153,7 @@ public:
      * @note This is a snapshot and may be outdated immediately
      * @return true if queue appears empty, false otherwise
      */
-    bool empty() const {
+    bool empty() const noexcept {
         Node* head = head_.load(std::memory_order_acquire);
         Node* next = head->next.load(std::memory_order_acquire);
         return next == nullptr;

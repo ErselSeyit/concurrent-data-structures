@@ -55,7 +55,7 @@ private:
         return hasher_(key) % buckets_.size();
     }
 
-    Node* find_node(Bucket& bucket, const Key& key) const {
+    Node* find_node(const Bucket& bucket, const Key& key) const {
         Node* current = bucket.head.load(std::memory_order_acquire);
         while (current) {
             if (!current->marked.load(std::memory_order_acquire) && 
@@ -123,7 +123,7 @@ public:
      */
     std::optional<Value> get(const Key& key) const {
         const Bucket& bucket = buckets_[bucket_index(key)];
-        Node* node = find_node(const_cast<Bucket&>(bucket), key);
+        Node* node = find_node(bucket, key);
         
         if (node) {
             Value* val = node->value.load(std::memory_order_acquire);
@@ -142,47 +142,83 @@ public:
      */
     bool erase(const Key& key) {
         Bucket& bucket = buckets_[bucket_index(key)];
-        Node* node = find_node(bucket, key);
         
-        if (!node) {
-            return false;
-        }
-
-        // Mark node for deletion
-        node->marked.store(true, std::memory_order_release);
-
-        // Remove from chain
-        Node* head = bucket.head.load(std::memory_order_acquire);
-        if (head == node) {
-            // Node is at head
-            Node* next = node->next.load(std::memory_order_acquire);
-            while (!bucket.head.compare_exchange_weak(
-                head, next,
-                std::memory_order_release,
-                std::memory_order_acquire)) {
-                if (head != node) break;
-                next = node->next.load(std::memory_order_acquire);
+        // Retry loop for finding and removing the node
+        while (true) {
+            Node* node = find_node(bucket, key);
+            
+            if (!node) {
+                return false;
             }
-        } else {
-            // Find previous node
-            Node* prev = head;
-            while (prev) {
-                Node* next = prev->next.load(std::memory_order_acquire);
-                if (next == node) {
-                    Node* node_next = node->next.load(std::memory_order_acquire);
-                    prev->next.compare_exchange_weak(
-                        next, node_next,
-                        std::memory_order_release,
-                        std::memory_order_acquire);
-                    break;
+
+            // Mark node for deletion (prevents other threads from finding it)
+            bool was_marked = node->marked.exchange(true, std::memory_order_acq_rel);
+            if (was_marked) {
+                // Node was already marked by another thread, retry to find it again
+                // (it might have been removed already)
+                continue;
+            }
+            
+            // Successfully marked the node - we own it now
+            // Remove from chain
+            Node* head = bucket.head.load(std::memory_order_acquire);
+            if (head == node) {
+                // Node is at head - try to update head
+                Node* next = node->next.load(std::memory_order_acquire);
+                while (!bucket.head.compare_exchange_weak(
+                    head, next,
+                    std::memory_order_release,
+                    std::memory_order_acquire)) {
+                    if (head != node) {
+                        // Head changed to a different node - restart from beginning
+                        // (another thread might have removed our node or changed the chain)
+                        continue;
+                    }
+                    next = node->next.load(std::memory_order_acquire);
                 }
-                prev = next;
+            } else {
+                // Find previous node and remove from middle
+                Node* prev = head;
+                bool removed = false;
+                while (prev && !removed) {
+                    Node* next = prev->next.load(std::memory_order_acquire);
+                    if (next == node) {
+                        Node* node_next = node->next.load(std::memory_order_acquire);
+                        if (prev->next.compare_exchange_weak(
+                            next, node_next,
+                            std::memory_order_release,
+                            std::memory_order_acquire)) {
+                            removed = true;
+                        } else {
+                            // CAS failed, chain changed - restart search from beginning
+                            break;
+                        }
+                    } else if (next == nullptr) {
+                        // Reached end of chain, node not found (might have been removed)
+                        break;
+                    }
+                    prev = next;
+                }
+                
+                // If removal failed, retry from the beginning
+                if (!removed) {
+                    continue;
+                }
             }
-        }
 
-        size_.fetch_sub(1, std::memory_order_relaxed);
-        delete node;
-        return true;
+            // Successfully removed from chain, now safe to delete
+            size_.fetch_sub(1, std::memory_order_relaxed);
+            
+            // Delete value first
+            Value* val = node->value.exchange(nullptr, std::memory_order_acq_rel);
+            if (val) {
+                delete val;
+            }
+            
+            // Delete node (safe now as it's removed from chain and marked)
+            delete node;
+            return true;
+        }
     }
 
     /**
@@ -193,7 +229,7 @@ public:
      */
     bool contains(const Key& key) const {
         const Bucket& bucket = buckets_[bucket_index(key)];
-        return find_node(const_cast<Bucket&>(bucket), key) != nullptr;
+        return find_node(bucket, key) != nullptr;
     }
 
     /**
@@ -201,7 +237,7 @@ public:
      * 
      * @return Approximate number of elements
      */
-    size_t size() const {
+    size_t size() const noexcept {
         return size_.load(std::memory_order_acquire);
     }
 
@@ -210,7 +246,7 @@ public:
      * 
      * @return true if empty, false otherwise
      */
-    bool empty() const {
+    bool empty() const noexcept {
         return size() == 0;
     }
 };

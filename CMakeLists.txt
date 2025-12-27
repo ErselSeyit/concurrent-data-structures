@@ -71,6 +71,7 @@ file(GLOB TEST_SOURCES "tests/*.cpp")
 add_executable(tests ${TEST_SOURCES})
 target_link_libraries(tests PRIVATE concurrent_data_structures gtest_main)
 target_include_directories(tests PRIVATE ${googletest_SOURCE_DIR}/include)
+# Add timeout for stress tests (they may take longer)
 
 # Example executable
 add_executable(example examples/main.cpp)

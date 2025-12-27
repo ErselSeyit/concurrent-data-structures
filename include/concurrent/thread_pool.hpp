@@ -2,6 +2,7 @@
 
 #include "lockfree_queue.hpp"
 #include <atomic>
+#include <chrono>
 #include <condition_variable>
 #include <functional>
 #include <future>
@@ -116,21 +117,27 @@ public:
 
     /**
      * @brief Waits for all tasks to complete
+     * 
+     * This function waits until all queued and active tasks have been
+     * processed by worker threads. It does not execute tasks itself.
      */
     void wait() {
-        // Wait for active tasks to complete
-        while (active_tasks_.load(std::memory_order_acquire) > 0) {
-            std::this_thread::yield();
-        }
-        
-        // Drain the queue to ensure all tasks are processed
-        while (!task_queue_.empty()) {
-            auto task_opt = task_queue_.dequeue();
-            if (task_opt.has_value()) {
-                active_tasks_.fetch_add(1, std::memory_order_relaxed);
-                task_opt.value()();
-                active_tasks_.fetch_sub(1, std::memory_order_relaxed);
+        // Wait until queue is empty and no tasks are active
+        while (true) {
+            size_t active = active_tasks_.load(std::memory_order_acquire);
+            bool queue_empty = task_queue_.empty();
+            
+            if (active == 0 && queue_empty) {
+                // Double-check to avoid race condition
+                std::this_thread::yield();
+                active = active_tasks_.load(std::memory_order_acquire);
+                queue_empty = task_queue_.empty();
+                
+                if (active == 0 && queue_empty) {
+                    break;
+                }
             }
+            
             std::this_thread::yield();
         }
     }
@@ -140,7 +147,7 @@ public:
      * 
      * @return Number of currently executing tasks
      */
-    size_t active_tasks() const {
+    size_t active_tasks() const noexcept {
         return active_tasks_.load(std::memory_order_acquire);
     }
 
@@ -149,7 +156,7 @@ public:
      * 
      * @return Approximate number of queued tasks
      */
-    size_t queued_tasks() const {
+    size_t queued_tasks() const noexcept {
         return task_queue_.approximate_size();
     }
 };
